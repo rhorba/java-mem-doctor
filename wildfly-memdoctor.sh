@@ -60,7 +60,12 @@ HEAP_CRITICAL_PERCENT=90   # Critical alert when heap > 90%
 THREAD_WARN_COUNT=300      # Warn when thread count > 300
 THREAD_CRITICAL_COUNT=500  # Critical when threads > 500
 GC_OVERHEAD_WARN=30        # Warn when GC time > 30% of total time
-METASPACE_WARN_PERCENT=85  # Warn when metaspace > 85%
+METASPACE_WARN_PERCENT=85  # Warn when metaspace > 85% of -XX:MaxMetaspaceSize
+STUCK_STACK_THRESHOLD=50   # Warn when this many threads sit on the same application frame
+TOP_CONSUMER_PERCENT=25    # Flag a class holding more than 25% of the live heap (50% for byte[]/char[])
+GENERIC_COLLECTION_PERCENT=15  # Flag Map/List internals only above this share of the live heap
+APP_CLASS_MIN_INSTANCES=1000   # Flag an application class with this many live instances
+APP_PACKAGES="${APP_PACKAGES:-}"   # e.g. "com.mycompany org.myapp" (empty = auto-detect)
 
 # How often to sample (seconds) when in monitor mode
 MONITOR_INTERVAL=60
@@ -78,7 +83,7 @@ REPORT_EMAIL=""
 TIMESTAMP=$(date '+%Y-%m-%d_%H-%M-%S')
 DATE_TODAY=$(date '+%Y-%m-%d')
 LOG_FILE="${LOG_DIR}/memdoctor_${DATE_TODAY}.log"
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # Colors for terminal output
 RED='\033[0;31m'
@@ -98,11 +103,70 @@ log() {
     local ts=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[${ts}] [${level}] ${msg}" >> "${LOG_FILE}"
     case "${level}" in
-        ERROR)    echo -e "${RED}[${level}] ${msg}${RST}" ;;
-        WARN)     echo -e "${YEL}[${level}] ${msg}${RST}" ;;
-        INFO)     echo -e "${GRN}[${level}] ${msg}${RST}" ;;
-        DEBUG)    echo -e "${CYN}[${level}] ${msg}${RST}" ;;
-        *)        echo "[${level}] ${msg}" ;;
+        ERROR)    echo -e "${RED}[${level}] ${msg}${RST}" >&2 ;;
+        WARN)     echo -e "${YEL}[${level}] ${msg}${RST}" >&2 ;;
+        INFO)     echo -e "${GRN}[${level}] ${msg}${RST}" >&2 ;;
+        DEBUG)    echo -e "${CYN}[${level}] ${msg}${RST}" >&2 ;;
+        *)        echo "[${level}] ${msg}" >&2 ;;
+    esac
+}
+
+# grep -c prints 0 AND exits 1 when nothing matches, so "|| echo 0" yields two zeros.
+count_matches() {
+    local n
+    n=$(grep -c -- "$1" "$2" 2>/dev/null) || true
+    echo "${n:-0}"
+}
+
+# Make one line of text safe inside a JSON string.
+json_escape() {
+    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/ /g' | tr -d '\000-\037'
+}
+
+# Metaspace used vs -XX:MaxMetaspaceSize. The jstat "M" column is used/committed and
+# sits near 97% on any healthy JVM, so it must not drive an alert. 0 = no limit set.
+get_metaspace_pct() {
+    local pid="$1"
+    local mu_kb max_bytes
+    mu_kb=$(${JSTAT} -gc "${pid}" 2>/dev/null | tail -1 | awk '{printf "%.0f", $10}') || true
+    max_bytes=$(${JCMD} "${pid}" VM.flags 2>/dev/null | grep -o 'MaxMetaspaceSize=[0-9]*' | head -1 | cut -d= -f2) || true
+    if [[ -z "${mu_kb}" || -z "${max_bytes}" ]] || (( ${#max_bytes} > 15 )) || (( max_bytes == 0 )); then
+        echo 0
+        return 0
+    fi
+    echo $(( mu_kb * 1024 * 100 / max_bytes ))
+}
+
+# Old gen used vs its MAXIMUM size (-Xmx). The jstat "O" column is used/current capacity,
+# which reads high on a heap that simply has not grown yet.
+get_old_gen_pct() {
+    local pid="$1"
+    local ou_kb max_kb
+    ou_kb=$(${JSTAT} -gc "${pid}" 2>/dev/null | tail -1 | awk '{printf "%.0f", $8}') || true
+    max_kb=$(${JSTAT} -gccapacity "${pid}" 2>/dev/null | tail -1 | awk '{printf "%.0f", $8}') || true
+    if [[ -z "${ou_kb}" || -z "${max_kb}" ]] || (( max_kb == 0 )); then
+        ${JSTAT} -gcutil "${pid}" 2>/dev/null | tail -1 | awk '{printf "%.0f", $4}'
+        return 0
+    fi
+    echo $(( ou_kb * 100 / max_kb ))
+}
+
+# Is this an application class (as opposed to JDK / server / library code)?
+# Set APP_PACKAGES="com.mycompany org.myapp" to be exact; otherwise a deny-list is used.
+is_app_class() {
+    local c="$1"
+    if [[ -n "${APP_PACKAGES}" ]]; then
+        local p
+        for p in ${APP_PACKAGES}; do
+            [[ "${c}" == "${p}"* ]] && return 0
+        done
+        return 1
+    fi
+    case "${c}" in
+        org.apache.jsp.*) return 0 ;;
+        \[*|java.*|javax.*|jakarta.*|jdk.*|sun.*|com.sun.*|org.jboss.*|org.wildfly.*|io.undertow.*|org.xnio.*|org.apache.*|org.hibernate.*|org.infinispan.*|org.glassfish.*|org.eclipse.*|io.netty.*|io.smallrye.*|com.fasterxml.*|org.slf4j.*|ch.qos.*|org.springframework.*|oracle.*|com.oracle.*|org.postgresql.*|com.mysql.*|org.w3c.*|org.xml.*|com.ibm.*|org.omg.*|org.jgroups.*|org.picketbox.*|org.ietf.*|io.micrometer.*|org.yaml.*|com.google.*|org.objectweb.*|net.bytebuddy.*|org.codehaus.*|org.bouncycastle.*|org.reactivestreams.*|io.opentelemetry.*|org.jberet.*|org.dom4j.*|org.keycloak.*|io.agroal.*|io.reactivex.*|org.antlr.*|org.aesh.*|org.ironjacamar.*|org.projectodd.*|org.joda.*|kotlin.*|scala.*) return 1 ;;
+        *.*) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
@@ -167,6 +231,11 @@ collect_heap_stats() {
     # jcmd VM.native_memory (if NMT enabled with -XX:NativeMemoryTracking=summary)
     echo "=== NATIVE MEMORY TRACKING ===" >> "${outfile}"
     ${JCMD} "${pid}" VM.native_memory summary 2>/dev/null >> "${outfile}" || echo "NMT not enabled" >> "${outfile}"
+    echo "" >> "${outfile}"
+
+    echo "=== METASPACE VS LIMIT ===" >> "${outfile}"
+    echo "METASPACE_PCT=$(get_metaspace_pct "${pid}")" >> "${outfile}"
+    echo "OLD_GEN_PCT=$(get_old_gen_pct "${pid}")" >> "${outfile}"
 
     echo "${outfile}"
 }
@@ -217,12 +286,16 @@ collect_class_histogram() {
 
     log INFO "Capturing class histogram (top memory consumers)..."
 
-    ${JMAP} -histo:live "${pid}" 2>/dev/null | head -100 > "${outfile}" || {
-        ${JCMD} "${pid}" GC.class_histogram 2>/dev/null | head -100 > "${outfile}" || {
-            log WARN "Could not capture class histogram"
-            return 1
-        }
+    local raw
+    raw=$(${JMAP} -histo:live "${pid}" 2>/dev/null) || raw=$(${JCMD} "${pid}" GC.class_histogram 2>/dev/null) || {
+        log WARN "Could not capture class histogram"
+        return 1
     }
+    # Top 300 rows, plus the "Total" line so shares of the live heap can be computed
+    {
+        printf '%s\n' "${raw}" | sed -n '1,302p'
+        printf '%s\n' "${raw}" | grep "^Total" | tail -1 || true
+    } > "${outfile}"
 
     log INFO "Class histogram saved: ${outfile}"
     echo "${outfile}"
@@ -281,8 +354,11 @@ analyze_heap_stats() {
         # gcutil columns: S0 S1 E O M CCS YGC YGCT FGC FGCT CGC CGCT GCT
         old_gen_pct=$(echo "${gcutil_line}" | awk '{printf "%.0f", $4}')
         eden_pct=$(echo "${gcutil_line}" | awk '{printf "%.0f", $3}')
-        meta_pct=$(echo "${gcutil_line}" | awk '{printf "%.0f", $5}')
     fi
+    meta_pct=$(sed -n 's/^METASPACE_PCT=//p' "${stats_file}" 2>/dev/null | head -1)
+    meta_pct=${meta_pct:-0}
+    local old_vs_max=$(sed -n 's/^OLD_GEN_PCT=//p' "${stats_file}" 2>/dev/null | head -1)
+    [[ -n "${old_vs_max}" ]] && old_gen_pct=${old_vs_max}
 
     cat > "${result_file}" <<EOF
 {
@@ -324,7 +400,7 @@ generate_heap_findings() {
 
     if (( meta_pct >= METASPACE_WARN_PERCENT )); then
         [[ -n "${findings}" ]] && findings+=","
-        findings+='"WARNING: Metaspace at '${meta_pct}'% — possible classloader leak from hot deployments."'
+        findings+='"WARNING: Metaspace at '${meta_pct}'% of MaxMetaspaceSize — possible classloader leak from hot deployments."'
     fi
 
     if [[ -z "${findings}" ]]; then
@@ -340,12 +416,12 @@ analyze_thread_dump() {
 
     log INFO "Analyzing thread dump..."
 
-    local total_threads=$(grep -c "^\"" "${thread_file}" 2>/dev/null || echo 0)
-    local blocked_threads=$(grep -c "java.lang.Thread.State: BLOCKED" "${thread_file}" 2>/dev/null || echo 0)
-    local waiting_threads=$(grep -c "java.lang.Thread.State: WAITING" "${thread_file}" 2>/dev/null || echo 0)
-    local timed_waiting=$(grep -c "java.lang.Thread.State: TIMED_WAITING" "${thread_file}" 2>/dev/null || echo 0)
-    local runnable_threads=$(grep -c "java.lang.Thread.State: RUNNABLE" "${thread_file}" 2>/dev/null || echo 0)
-    local deadlocks=$(grep -c "Found.*deadlock" "${thread_file}" 2>/dev/null || echo 0)
+    local total_threads=$(count_matches '^"' "${thread_file}")
+    local blocked_threads=$(count_matches "java.lang.Thread.State: BLOCKED" "${thread_file}")
+    local waiting_threads=$(count_matches "java.lang.Thread.State: WAITING" "${thread_file}")
+    local timed_waiting=$(count_matches "java.lang.Thread.State: TIMED_WAITING" "${thread_file}")
+    local runnable_threads=$(count_matches "java.lang.Thread.State: RUNNABLE" "${thread_file}")
+    local deadlocks=$(count_matches "Found.*deadlock" "${thread_file}")
 
     # Find most common stack traces (leak suspects)
     local top_stacks=$(grep -A5 "java.lang.Thread.State:" "${thread_file}" 2>/dev/null \
@@ -372,6 +448,18 @@ analyze_thread_dump() {
         findings+="{\"severity\":\"WARNING\",\"issue\":\"High thread count: ${total_threads}\",\"detail\":\"Approaching thread limit\",\"solution\":\"Review thread pool configurations in standalone.xml. Check for threads created in loops without proper lifecycle management.\"},"
     fi
 
+    # Many threads parked on the same application frame = workers created and never released
+    local stuck_line=$(grep -A8 "java.lang.Thread.State:" "${thread_file}" 2>/dev/null \
+        | grep "at " \
+        | grep -v -E "at (java|jdk|sun|javax|jakarta|com\.sun)\.|at org\.(jboss|wildfly|xnio)\.|at io\.(undertow|netty)\." \
+        | sort | uniq -c | sort -rn | head -1 || true)
+    local stuck_count=$(echo "${stuck_line}" | awk '{print $1+0}')
+    stuck_count=${stuck_count:-0}
+    local stuck_frame=$(echo "${stuck_line}" | sed -e 's/^ *[0-9]* *//' | json_escape)
+    if (( stuck_count >= STUCK_STACK_THRESHOLD )); then
+        findings+="{\"severity\":\"WARNING\",\"issue\":\"${stuck_count} threads sit on the same application frame\",\"detail\":\"${stuck_frame}\",\"solution\":\"Threads are created and never released. Look for an ExecutorService or Thread created per request and never shut down, or workers blocked forever on that call. Use one shared, bounded pool (ManagedExecutorService in EE) and shut it down in @PreDestroy.\"},"
+    fi
+
     # Remove trailing comma
     findings="${findings%,}"
 
@@ -384,9 +472,9 @@ analyze_thread_dump() {
     "waiting": ${waiting_threads},
     "timed_waiting": ${timed_waiting},
     "deadlocks": ${deadlocks},
-    "status": "$(if (( deadlocks > 0 || total_threads > THREAD_CRITICAL_COUNT )); then echo CRITICAL; elif (( total_threads > THREAD_WARN_COUNT || blocked_threads > 20 )); then echo WARNING; else echo OK; fi)",
+    "status": "$(if (( deadlocks > 0 || total_threads > THREAD_CRITICAL_COUNT )); then echo CRITICAL; elif (( total_threads > THREAD_WARN_COUNT || blocked_threads > 20 || stuck_count >= STUCK_STACK_THRESHOLD )); then echo WARNING; else echo OK; fi)",
     "findings": [${findings}],
-    "top_stack_traces": $(echo "${top_stacks}" | awk '{printf "    \"%s\",\n", $0}' | sed '$ s/,$//' | { echo "["; cat; echo "  ]"; })
+    "top_stack_traces": $(echo "${top_stacks}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/ /g' | awk '{printf "    \"%s\",\n", $0}' | sed '$ s/,$//' | { echo "["; cat; echo "  ]"; })
 }
 EOF
 
@@ -402,6 +490,8 @@ analyze_class_histogram() {
     # Extract top memory consumers
     # Format: num #instances #bytes class_name
     local suspects=""
+    local total_bytes=$(grep "^Total" "${histo_file}" 2>/dev/null | tail -1 | awk '{print $3+0}')
+    total_bytes=${total_bytes:-0}
 
     # Known leak patterns
     while IFS= read -r line; do
@@ -414,14 +504,44 @@ analyze_class_histogram() {
         local issue=""
         local solution=""
 
-        case "${class_name}" in
+        # 1. Who holds the heap: any class above TOP_CONSUMER_PERCENT of live bytes
+        local pct=0
+        if (( total_bytes > 0 )); then
+            pct=$(( bytes * 100 / total_bytes ))
+        fi
+        # byte[]/char[] back every String, so they lead on a healthy server too: ask for twice the share
+        local top_limit=${TOP_CONSUMER_PERCENT}
+        case "${class_name}" in "[B"|"[C") top_limit=$(( TOP_CONSUMER_PERCENT * 2 )) ;; esac
+        if (( pct >= top_limit )); then
+            issue="Holds ${pct}% of the live heap ($(( bytes / 1048576 )) MB in ${instances} instances)"
+            case "${class_name}" in
+                "[B"|"[C")
+                    solution="Raw byte/char arrays are the payload, not the owner. Look at the application classes listed below that keep them alive (caches, buffers, uploaded files or reports held in memory), then confirm the owner with a heap dump."
+                    ;;
+                *)
+                    solution="Largest consumer of the live heap. Find what keeps these instances reachable (static fields, caches, session attributes) and bound or evict it."
+                    ;;
+            esac
+        # 2. Application classes that pile up
+        elif is_app_class "${class_name}" && (( instances >= APP_CLASS_MIN_INSTANCES )); then
+            issue="Application class with ${instances} live instances after a full GC"
+            solution="These objects survive garbage collection, so something still references them. Check static collections and caches without eviction, listeners never unregistered, and objects stored in HttpSession. Compare two snapshots: a count that only grows is the leak."
+        fi
+
+        # 3. Generic patterns (only when nothing more specific was found)
+        [[ -z "${issue}" ]] && case "${class_name}" in
             *HashMap*|*ConcurrentHashMap*)
-                issue="Large number of HashMap instances (${instances})"
-                solution="Check for Maps used as caches without eviction. Use WeakHashMap or Caffeine cache with maxSize. Review static Map fields that grow unbounded."
+                # Maps are everywhere in a healthy server: only a real share of the heap counts
+                if (( pct >= GENERIC_COLLECTION_PERCENT )); then
+                    issue="Map entries hold ${pct}% of the live heap (${instances} instances)"
+                    solution="Check for Maps used as caches without eviction. Use WeakHashMap or Caffeine cache with maxSize. Review static Map fields that grow unbounded."
+                fi
                 ;;
             *ArrayList*|*LinkedList*)
-                issue="Large collection count: ${class_name} (${instances})"
-                solution="Check for Lists that accumulate data without clearing. Look for event listeners/observers that register but never unregister."
+                if (( pct >= GENERIC_COLLECTION_PERCENT )); then
+                    issue="${class_name} holds ${pct}% of the live heap (${instances} instances)"
+                    solution="Check for Lists that accumulate data without clearing. Look for event listeners/observers that register but never unregister."
+                fi
                 ;;
             *byte[]|*char[]|*String)
                 if (( instances > 500000 )); then
@@ -430,20 +550,28 @@ analyze_class_histogram() {
                 fi
                 ;;
             *Connection*|*Statement*|*ResultSet*)
-                issue="JDBC objects not released: ${class_name} (${instances})"
-                solution="Ensure DB connections are closed in finally blocks or use try-with-resources. Check DataSource pool configuration in standalone.xml. Review @Transactional boundaries."
+                if (( instances > 1000 )); then
+                    issue="JDBC objects not released: ${class_name} (${instances})"
+                    solution="Ensure DB connections are closed in finally blocks or use try-with-resources. Check DataSource pool configuration in standalone.xml. Review @Transactional boundaries."
+                fi
                 ;;
             *Session*|*HttpSession*)
-                issue="Excessive session objects (${instances})"
-                solution="Review session timeout settings. Check for large objects stored in HttpSession. Implement session cleanup listeners."
+                if (( instances > 10000 )); then
+                    issue="Excessive session objects (${instances})"
+                    solution="Review session timeout settings. Check for large objects stored in HttpSession. Implement session cleanup listeners."
+                fi
                 ;;
             *Timer*|*TimerTask*|*ScheduledFuture*)
-                issue="Accumulated timer/scheduler objects (${instances})"
-                solution="Cancel timers in @PreDestroy. Use ManagedScheduledExecutorService instead of java.util.Timer in EE containers."
+                if (( instances > 1000 )); then
+                    issue="Accumulated timer/scheduler objects (${instances})"
+                    solution="Cancel timers in @PreDestroy. Use ManagedScheduledExecutorService instead of java.util.Timer in EE containers."
+                fi
                 ;;
-            *ClassLoader*|*ModuleClassLoader*)
-                issue="Multiple classloader instances (${instances})"
-                solution="Classloader leak from redeployments. Restart WildFly periodically. Check for ThreadLocal values referencing webapp classes. Review JNDI lookups caching classloader references."
+            *ClassLoader)
+                if (( instances > 5000 )); then
+                    issue="Multiple classloader instances (${instances})"
+                    solution="Classloader leak from redeployments. Restart WildFly periodically. Check for ThreadLocal values referencing webapp classes. Review JNDI lookups caching classloader references."
+                fi
                 ;;
             *Proxy*|*\$Proxy*)
                 if (( instances > 10000 )); then
@@ -456,7 +584,7 @@ analyze_class_histogram() {
         if [[ -n "${issue}" ]]; then
             suspects+="{\"class\":\"${class_name}\",\"instances\":${instances},\"bytes\":${bytes},\"issue\":\"${issue}\",\"solution\":\"${solution}\"},"
         fi
-    done < <(tail -n +4 "${histo_file}" | head -50)
+    done < <(grep -E '^ *[0-9]+: ' "${histo_file}" | sed -n '1,300p')
 
     suspects="${suspects%,}"
 
@@ -515,14 +643,15 @@ analyze_wildfly_subsystems() {
 
     # Check WildFly server log for OOM warnings
     if [[ -f "${WILDFLY_LOG}" ]]; then
-        local oom_count=$(grep -c "OutOfMemoryError\|GC overhead limit\|Java heap space\|Metaspace" "${WILDFLY_LOG}" 2>/dev/null || echo 0)
+        # Real errors only: JVM flags such as -XX:+HeapDumpOnOutOfMemoryError also appear in the boot log
+        local oom_count=$(count_matches "java\.lang\.OutOfMemoryError" "${WILDFLY_LOG}")
         if (( oom_count > 0 )); then
-            local last_oom=$(grep "OutOfMemoryError\|GC overhead limit\|Java heap space\|Metaspace" "${WILDFLY_LOG}" | tail -1)
+            local last_oom=$(grep "java\.lang\.OutOfMemoryError" "${WILDFLY_LOG}" | tail -1 | cut -c1-300 | json_escape)
             findings+="{\"subsystem\":\"jvm\",\"severity\":\"CRITICAL\",\"issue\":\"${oom_count} OOM errors found in server.log\",\"detail\":\"Last: ${last_oom}\",\"solution\":\"Increase -Xmx in standalone.conf. If recurring, analyze heap dumps to find leak source. Consider adding -XX:+HeapDumpOnOutOfMemoryError.\"},"
         fi
 
         # Check for stuck deployments
-        local stuck=$(grep -c "WFLYSRV0coords.*deploy.*stuck\|MSC.*service.*failed" "${WILDFLY_LOG}" 2>/dev/null || echo 0)
+        local stuck=$(count_matches "WFLYSRV0coords.*deploy.*stuck\|MSC.*service.*failed" "${WILDFLY_LOG}")
         if (( stuck > 0 )); then
             findings+="{\"subsystem\":\"deployment\",\"severity\":\"WARNING\",\"issue\":\"${stuck} stuck/failed deployment entries in log\",\"solution\":\"Review deployment dependencies. Check for circular CDI injection. Verify all required DataSources and JMS queues exist.\"},"
         fi
@@ -552,8 +681,9 @@ check_precrash_indicators() {
 
     # 1. Heap usage trend
     local gcutil=$(${JSTAT} -gcutil "${pid}" 2>/dev/null | tail -1)
-    local old_pct=$(echo "${gcutil}" | awk '{printf "%.0f", $4}')
-    local meta_pct=$(echo "${gcutil}" | awk '{printf "%.0f", $5}')
+    local old_pct=$(get_old_gen_pct "${pid}")
+    old_pct=${old_pct:-0}
+    local meta_pct=$(get_metaspace_pct "${pid}")
     local fgc_count=$(echo "${gcutil}" | awk '{print $9}')
     local fgc_time=$(echo "${gcutil}" | awk '{print $10}')
     local gc_total_time=$(echo "${gcutil}" | awk '{print $NF}')
@@ -589,7 +719,7 @@ check_precrash_indicators() {
 
     # 5. Metaspace
     if (( meta_pct >= METASPACE_WARN_PERCENT )); then
-        alerts+="{\"type\":\"METASPACE_LEAK\",\"severity\":\"WARNING\",\"message\":\"Metaspace at ${meta_pct}%\",\"time\":\"${TIMESTAMP}\",\"solution\":\"Classloader leak — likely from hot redeployments. Each deploy loads new classes without unloading old ones. Schedule a WildFly restart. Avoid redeployment; do full redeploy cycles.\"},"
+        alerts+="{\"type\":\"METASPACE_LEAK\",\"severity\":\"WARNING\",\"message\":\"Metaspace at ${meta_pct}% of MaxMetaspaceSize\",\"time\":\"${TIMESTAMP}\",\"solution\":\"Classloader leak — likely from hot redeployments. Each deploy loads new classes without unloading old ones. Schedule a WildFly restart. Avoid redeployment; do full redeploy cycles.\"},"
         [[ "${severity}" != "CRITICAL" ]] && severity="WARNING"
     fi
 
@@ -668,13 +798,13 @@ generate_daily_report() {
 {
     "report_date": "${report_date}",
     "generated_at": "$(date -Iseconds)",
-    "server": "$(hostname)",
+    "server": "$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)",
     "wildfly_home": "${WILDFLY_HOME}",
     "summary": {
-        "total_snapshots": $(echo "${heap_analyses}" | grep -c "." || echo 0),
-        "total_alerts": $(echo "${alerts}" | grep -c "." || echo 0),
-        "critical_alerts": $(for f in ${alerts}; do cat "$f" 2>/dev/null; done | grep -c '"CRITICAL"' || echo 0),
-        "warning_alerts": $(for f in ${alerts}; do cat "$f" 2>/dev/null; done | grep -c '"WARNING"' || echo 0)
+        "total_snapshots": $(echo "${heap_analyses}" | grep -c "." || true),
+        "total_alerts": $(echo "${alerts}" | grep -c "." || true),
+        "critical_alerts": $(for f in ${alerts}; do cat "$f" 2>/dev/null; done | grep -o '"severity":"CRITICAL"' | wc -l || true),
+        "warning_alerts": $(for f in ${alerts}; do cat "$f" 2>/dev/null; done | grep -o '"severity":"WARNING"' | wc -l || true)
     },
     "heap_trend": [
 $(for f in ${heap_analyses}; do
@@ -778,75 +908,121 @@ generate_html_report() {
 <body>
 <div class="header">
   <h1>🩺 WildFly MemDoctor — Daily Diagnostic Report</h1>
-  <div class="meta">
-    Report will be populated by the JSON data file.<br>
-    Open this file alongside the JSON report for full details.
-  </div>
+  <div class="meta" id="meta">—</div>
 </div>
 <div class="grid">
   <div class="stat-card"><div class="value" id="snapshots">—</div><div class="label">Snapshots</div></div>
+  <div class="stat-card"><div class="value" id="oldgen">—</div><div class="label">Old Gen (latest)</div></div>
+  <div class="stat-card"><div class="value" id="threads">—</div><div class="label">Threads (latest)</div></div>
   <div class="stat-card"><div class="value crit" id="criticals">—</div><div class="label">Critical Alerts</div></div>
   <div class="stat-card"><div class="value warn" id="warnings">—</div><div class="label">Warnings</div></div>
   <div class="stat-card"><div class="value ok" id="status">—</div><div class="label">Overall Status</div></div>
 </div>
 <section>
-  <h2>Memory Leak Suspects & Solutions</h2>
-  <div id="findings"><p class="empty">Load the corresponding report_YYYY-MM-DD.json to populate.</p></div>
+  <h2>Heap</h2>
+  <div id="heap"><p class="empty">No heap analysis recorded.</p></div>
+</section>
+<section>
+  <h2>Memory Leak Suspects &amp; Solutions (latest snapshot)</h2>
+  <div id="findings"><p class="empty">No suspect classes found.</p></div>
+</section>
+<section>
+  <h2>Threads</h2>
+  <div id="threadfindings"><p class="empty">No thread analysis recorded.</p></div>
+</section>
+<section>
+  <h2>WildFly Findings</h2>
+  <div id="wildfly"><p class="empty">No WildFly-specific findings.</p></div>
 </section>
 <section>
   <h2>Alert Timeline</h2>
   <div id="alerts"><p class="empty">No alerts recorded.</p></div>
 </section>
-<section>
-  <h2>Recommended Actions</h2>
-  <div id="actions"><p class="empty">Pending analysis...</p></div>
-</section>
-<footer>WildFly MemDoctor v1.0 — Offline Java Memory Diagnostics</footer>
+<footer>WildFly MemDoctor v1.1 — Offline Java Memory Diagnostics</footer>
 
+<script id="report-data" type="application/json">
+HTMLEOF
+    # Inline the JSON: a file:// page cannot fetch() its sibling .json
+    sed 's#</#<\\/#g' "${json_file}" >> "${html_file}"
+    cat >> "${html_file}" <<'HTMLEOF'
+</script>
 <script>
-// Auto-load JSON report if served from same directory
-(async function() {
-  const jsonFile = location.pathname.replace('.html', '.json');
-  try {
-    const resp = await fetch(jsonFile);
-    if (!resp.ok) return;
-    const data = await resp.json();
-    document.getElementById('snapshots').textContent = data.summary?.total_snapshots || 0;
-    document.getElementById('criticals').textContent = data.summary?.critical_alerts || 0;
-    document.getElementById('warnings').textContent = data.summary?.warning_alerts || 0;
-    const crit = data.summary?.critical_alerts || 0;
-    const warn = data.summary?.warning_alerts || 0;
-    document.getElementById('status').textContent = crit > 0 ? 'CRITICAL' : warn > 0 ? 'WARNING' : 'HEALTHY';
-    document.getElementById('status').className = crit > 0 ? 'value crit' : warn > 0 ? 'value warn' : 'value ok';
+(function() {
+  const $ = id => document.getElementById(id);
+  const esc = v => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  let data;
+  try { data = JSON.parse($('report-data').textContent); }
+  catch (e) { $('meta').textContent = 'Report data could not be read: ' + e.message; return; }
 
-    // Populate findings
-    let findingsHtml = '';
-    (data.class_suspects || []).forEach(cs => {
-      (cs.suspects || []).forEach(s => {
-        findingsHtml += `<div class="finding warning">
-          <span class="badge warning">SUSPECT</span>
-          <div class="issue">${s.class}: ${s.issue}</div>
-          <div class="solution">${s.solution}</div>
-          <div style="color:var(--muted);font-size:0.8rem;margin-top:0.3rem">Instances: ${s.instances} | Bytes: ${s.bytes}</div>
-        </div>`;
-      });
-    });
-    if (findingsHtml) document.getElementById('findings').innerHTML = findingsHtml;
+  const last = a => (a && a.length) ? a[a.length - 1] : null;
+  const heap = last(data.heap_trend), thr = last(data.thread_analyses), cls = last(data.class_suspects);
+  const card = (sev, badge, issue, solution, extra) => {
+    const c = sev === 'CRITICAL' ? 'critical' : 'warning';
+    return `<div class="finding ${c}"><span class="badge ${c}">${esc(badge)}</span>
+      <div class="issue">${esc(issue)}</div>` +
+      (solution ? `<div class="solution">${esc(solution)}</div>` : '') +
+      (extra ? `<div style="color:var(--muted);font-size:0.8rem;margin-top:0.3rem">${esc(extra)}</div>` : '') + `</div>`;
+  };
 
-    // Populate alerts
-    let alertsHtml = '';
-    (data.alerts_timeline || []).forEach(at => {
-      (at.alerts || []).forEach(a => {
-        const cls = a.severity === 'CRITICAL' ? 'critical' : 'warning';
-        alertsHtml += `<div class="finding ${cls}">
-          <span class="badge ${cls}">${a.severity}</span> <span style="color:var(--muted)">${a.time}</span>
-          <div class="issue">${a.type}: ${a.message}</div>
-          <div class="solution">${a.solution}</div>
-        </div>`;
-      });
+  $('meta').innerHTML = `Date: ${esc(data.report_date)} · Server: ${esc(data.server || 'unknown')} · WildFly home: ${esc(data.wildfly_home)}<br>Generated: ${esc(data.generated_at)}`;
+  $('snapshots').textContent = data.summary?.total_snapshots || 0;
+  $('criticals').textContent = data.summary?.critical_alerts || 0;
+  $('warnings').textContent = data.summary?.warning_alerts || 0;
+
+  let crit = data.summary?.critical_alerts || 0, warn = data.summary?.warning_alerts || 0;
+
+  if (heap) {
+    $('oldgen').textContent = heap.heap_old_gen_percent + '%';
+    $('oldgen').className = 'value ' + (heap.status === 'CRITICAL' ? 'crit' : heap.status === 'WARNING' ? 'warn' : 'ok');
+    if (heap.status === 'CRITICAL') crit++; else if (heap.status === 'WARNING') warn++;
+    let h = `<table><tr><th>Snapshot</th><th>Old Gen</th><th>Eden</th><th>Metaspace vs limit</th><th>Status</th></tr>`;
+    (data.heap_trend || []).forEach(x => {
+      h += `<tr><td>${esc(x.timestamp)}</td><td>${esc(x.heap_old_gen_percent)}%</td><td>${esc(x.heap_eden_percent)}%</td><td>${x.metaspace_percent ? esc(x.metaspace_percent) + '%' : 'no limit set'}</td><td>${esc(x.status)}</td></tr>`;
     });
-    if (alertsHtml) document.getElementById('alerts').innerHTML = alertsHtml;
-  } catch(e) { console.log('No JSON report found for auto-loading:', e); }
+    h += `</table>`;
+    (heap.findings || []).forEach(f => {
+      if (!/^OK/.test(f)) h += card(/^CRITICAL/.test(f) ? 'CRITICAL' : 'WARNING', /^CRITICAL/.test(f) ? 'CRITICAL' : 'WARNING', f);
+    });
+    $('heap').innerHTML = h;
+  }
+
+  if (cls && (cls.suspects || []).length) {
+    $('findings').innerHTML = cls.suspects.map(s =>
+      card('WARNING', 'SUSPECT', s.class + ': ' + s.issue, s.solution, 'Instances: ' + s.instances + ' | Bytes: ' + s.bytes)).join('');
+  }
+
+  if (thr) {
+    $('threads').textContent = thr.total_threads;
+    $('threads').className = 'value ' + (thr.status === 'CRITICAL' ? 'crit' : thr.status === 'WARNING' ? 'warn' : 'ok');
+    let t = `<table><tr><th>Total</th><th>Runnable</th><th>Blocked</th><th>Waiting</th><th>Timed waiting</th><th>Deadlocks</th></tr>
+      <tr><td>${esc(thr.total_threads)}</td><td>${esc(thr.runnable)}</td><td>${esc(thr.blocked)}</td><td>${esc(thr.waiting)}</td><td>${esc(thr.timed_waiting)}</td><td>${esc(thr.deadlocks)}</td></tr></table>`;
+    (thr.findings || []).forEach(f => {
+      if (f.severity === 'CRITICAL') crit++; else warn++;
+      t += card(f.severity, f.severity, f.issue, f.solution, f.detail);
+    });
+    const stacks = (thr.top_stack_traces || []).filter(x => x && x.trim());
+    if (stacks.length) t += `<div class="code-block">Most common stack frames (count, frame)\n` + stacks.map(esc).join('\n') + `</div>`;
+    $('threadfindings').innerHTML = t;
+  }
+
+  let w = '';
+  const wf = last(data.wildfly_issues);
+  ((wf && wf.wildfly_findings) || []).forEach(f => {
+    if (f.severity === 'CRITICAL') crit++; else warn++;
+    w += card(f.severity, f.severity, '[' + f.subsystem + '] ' + f.issue, f.solution, f.detail);
+  });
+  if (w) $('wildfly').innerHTML = w;
+
+  let alertsHtml = '';
+  (data.alerts_timeline || []).forEach(at => {
+    (at.alerts || []).forEach(a => {
+      alertsHtml += card(a.severity, a.severity + ' · ' + a.time, a.type + ': ' + a.message, a.solution);
+    });
+  });
+  if (alertsHtml) $('alerts').innerHTML = alertsHtml;
+
+  $('status').textContent = crit > 0 ? 'CRITICAL' : warn > 0 ? 'WARNING' : 'HEALTHY';
+  $('status').className = crit > 0 ? 'value crit' : warn > 0 ? 'value warn' : 'value ok';
 })();
 </script>
 </body>

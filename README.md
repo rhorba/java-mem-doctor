@@ -1,8 +1,37 @@
-# 🩺 WildFly MemDoctor v1.0
+# 🩺 WildFly MemDoctor v1.1
 
 **Offline Java Heap / Stack / Thread Dump Analyzer for WildFly Application Servers**
 
 Detects memory leaks, predicts crashes, and suggests exact code fixes — works fully air-gapped (no internet required on PROD).
+
+---
+
+## Sample Report
+
+[`docs/sample-report.html`](docs/sample-report.html) is a real report, not a mock-up. It comes from the lab in
+[`lab/`](lab/): WildFly 40 on JDK 17 with a 256 MB heap and a small app that leaks on purpose
+(a static cache that is never evicted, and an executor created per request and never shut down).
+
+On that server the report names the three things that matter:
+
+- old gen at 84 % of its maximum, up from 22 % on the healthy baseline snapshot
+- `byte[]` holding 85 % of the live heap, and the application class `leak_jsp$CachedSession` with 2,500 live instances
+- 200 threads parked on the same application frame, `leak_jsp.lambda$1`
+
+The baseline snapshot of the same server before the leak raises no suspect and no alert.
+
+![Sample report](docs/sample-report.png)
+
+Rebuild it:
+
+```bash
+docker build -f lab/Dockerfile -t memlab . && docker run -d --name memlab -p 18080:8080 memlab
+docker exec memlab bash -c 'cd /opt/wildfly-memdoctor && ./wildfly-memdoctor.sh snapshot'      # healthy baseline
+for i in $(seq 1 50); do curl -s -o /dev/null "http://localhost:18080/leak/leak.jsp?n=50&kb=64&threads=1"; done
+docker exec memlab bash -c 'cd /opt/wildfly-memdoctor && ./wildfly-memdoctor.sh snapshot && ./wildfly-memdoctor.sh report'
+```
+
+The HTML report is self-contained: the data is embedded, so it opens with a double-click on any machine.
 
 ---
 

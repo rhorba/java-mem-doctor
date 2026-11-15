@@ -1,0 +1,119 @@
+{
+    "report_date": "2026-11-15",
+    "generated_at": "2026-11-15T00:51:29+00:00",
+    "server": "1e039fdb7ecc",
+    "wildfly_home": "/opt/jboss/wildfly",
+    "summary": {
+        "total_snapshots": 2,
+        "total_alerts": 1,
+        "critical_alerts": 0,
+        "warning_alerts": 1
+    },
+    "heap_trend": [
+{
+    "timestamp": "2026-11-15_00-50-46",
+    "heap_old_gen_percent": 22,
+    "heap_eden_percent": 13,
+    "metaspace_percent": 34,
+    "status": "OK",
+    "findings": [
+        "OK: Memory usage within normal parameters."
+    ]
+}
+,
+{
+    "timestamp": "2026-11-15_00-51-16",
+    "heap_old_gen_percent": 84,
+    "heap_eden_percent": 18,
+    "metaspace_percent": 34,
+    "status": "WARNING",
+    "findings": [
+        "WARNING: Old Gen heap at 84% — potential memory leak detected. Monitor closely."
+    ]
+}
+    ],
+    "thread_analyses": [
+{
+    "timestamp": "2026-11-15_00-50-46",
+    "total_threads": 85,
+    "runnable": 33,
+    "blocked": 0,
+    "waiting": 20,
+    "timed_waiting": 16,
+    "deadlocks": 0,
+    "status": "OK",
+    "findings": [],
+    "top_stack_traces": [
+    "     26  at jdk.internal.misc.Unsafe.park(java.base@17.0.19/Native Method)",
+    "     22  at sun.nio.ch.SelectorImpl.lockAndDoSelect(java.base@17.0.19/SelectorImpl.java:129)",
+    "     22  at sun.nio.ch.EPoll.wait(java.base@17.0.19/Native Method)",
+    "     22  at sun.nio.ch.EPollSelectorImpl.doSelect(java.base@17.0.19/EPollSelectorImpl.java:118)",
+    "     11  at java.util.concurrent.locks.LockSupport.parkNanos(java.base@17.0.19/LockSupport.java:252)",
+    "     10  at org.jboss.threads.EnhancedQueueExecutor.runThreadBody(EnhancedQueueExecutor.java:1656)",
+    "     10  at org.jboss.threads.EnhancedQueueExecutor$PoolThreadNode.park(EnhancedQueueExecutor.java:2394)",
+    "     10  at java.util.concurrent.locks.LockSupport.park(java.base@17.0.19/LockSupport.java:211)",
+    "     10  at java.lang.Object.wait(java.base@17.0.19/Native Method)",
+    "      7  at java.util.concurrent.ScheduledThreadPoolExecutor$DelayedWorkQueue.take(java.base@17.0.19/ScheduledThreadPoolExecutor.java:1182)"
+  ]
+}
+,
+{
+    "timestamp": "2026-11-15_00-51-16",
+    "total_threads": 285,
+    "runnable": 33,
+    "blocked": 0,
+    "waiting": 18,
+    "timed_waiting": 218,
+    "deadlocks": 0,
+    "status": "WARNING",
+    "findings": [{"severity":"WARNING","issue":"200 threads sit on the same application frame","detail":" at org.apache.jsp.leak_jsp.lambda$1(leak_jsp.java:115)","solution":"Threads are created and never released. Look for an ExecutorService or Thread created per request and never shut down, or workers blocked forever on that call. Use one shared, bounded pool (ManagedExecutorService in EE) and shut it down in @PreDestroy."}],
+    "top_stack_traces": [
+    "    200  at org.apache.jsp.leak_jsp.lambda$1(leak_jsp.java:115)",
+    "    200  at org.apache.jsp.leak_jsp$$Lambda$1668/0x0000761b3ecdca20.run(Unknown Source)",
+    "    200  at java.util.concurrent.FutureTask.run(java.base@17.0.19/FutureTask.java:264)",
+    "    200  at java.util.concurrent.Executors$RunnableAdapter.call(java.base@17.0.19/Executors.java:539)",
+    "    200  at java.lang.Thread.sleep(java.base@17.0.19/Native Method)",
+    "     26  at jdk.internal.misc.Unsafe.park(java.base@17.0.19/Native Method)",
+    "     22  at sun.nio.ch.SelectorImpl.lockAndDoSelect(java.base@17.0.19/SelectorImpl.java:129)",
+    "     22  at sun.nio.ch.EPoll.wait(java.base@17.0.19/Native Method)",
+    "     22  at sun.nio.ch.EPollSelectorImpl.doSelect(java.base@17.0.19/EPollSelectorImpl.java:118)",
+    "     13  at java.util.concurrent.locks.LockSupport.parkNanos(java.base@17.0.19/LockSupport.java:252)"
+  ]
+}
+    ],
+    "class_suspects": [
+{
+    "timestamp": "2026-11-15_00-50-46",
+    "suspects": []
+}
+,
+{
+    "timestamp": "2026-11-15_00-51-16",
+    "suspects": [{"class":"[B","instances":149585,"bytes":183938640,"issue":"Holds 85% of the live heap (175 MB in 149585 instances)","solution":"Raw byte/char arrays are the payload, not the owner. Look at the application classes listed below that keep them alive (caches, buffers, uploaded files or reports held in memory), then confirm the owner with a heap dump."},{"class":"org.apache.jsp.leak_jsp$CachedSession","instances":2500,"bytes":60000,"issue":"Application class with 2500 live instances after a full GC","solution":"These objects survive garbage collection, so something still references them. Check static collections and caches without eviction, listeners never unregistered, and objects stored in HttpSession. Compare two snapshots: a count that only grows is the leak."}]
+}
+    ],
+    "wildfly_issues": [
+{
+    "timestamp": "2026-11-15_00-50-46",
+    "wildfly_findings": []
+}
+,
+{
+    "timestamp": "2026-11-15_00-51-16",
+    "wildfly_findings": []
+}
+    ],
+    "alerts_timeline": [
+{
+    "timestamp": "2026-11-15_00-51-16",
+    "pid": 121,
+    "overall_severity": "WARNING",
+    "heap_old_gen_pct": 81,
+    "metaspace_pct": 34,
+    "thread_count": 286,
+    "fd_count": 595,
+    "full_gc_count": 4,
+    "alerts": [{"type":"HEAP_WARNING","severity":"WARNING","message":"Old Gen at 81%","time":"2026-11-15_00-51-16","solution":"Memory growing. Check for request-scoped leaks (DB connections, streams, collections growing in session). Run class histogram to identify growing objects."}]
+}
+    ]
+}
