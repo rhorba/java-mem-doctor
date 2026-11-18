@@ -1,4 +1,4 @@
-# 🩺 WildFly MemDoctor v1.1
+# 🩺 WildFly MemDoctor v1.1.1
 
 [![CI](https://github.com/rhorba/java-mem-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/rhorba/java-mem-doctor/actions/workflows/ci.yml)
 

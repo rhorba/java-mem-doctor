@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# WildFly MemDoctor v1.1
+# WildFly MemDoctor v1.1.1
 # ─────────────────────────────────────────────────────────────────────────────
 # Java Heap / Stack / Thread Dump Analyzer for WildFly Application Servers
 #
@@ -79,7 +79,7 @@ RETENTION_DAYS=30
 TIMESTAMP=$(date '+%Y-%m-%d_%H-%M-%S')
 DATE_TODAY=$(date '+%Y-%m-%d')
 LOG_FILE="${LOG_DIR}/memdoctor_${DATE_TODAY}.log"
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 # Colors for terminal output
 RED='\033[0;31m'
@@ -932,7 +932,7 @@ generate_html_report() {
   <h2>Alert Timeline</h2>
   <div id="alerts"><p class="empty">No alerts recorded.</p></div>
 </section>
-<footer>WildFly MemDoctor v1.1 — Offline Java Memory Diagnostics</footer>
+<footer>WildFly MemDoctor v1.1.1 — Offline Java Memory Diagnostics</footer>
 
 <script id="report-data" type="application/json">
 HTMLEOF
