@@ -93,6 +93,16 @@ check "old gen grew after the leak"         '.heap_trend[1].heap_old_gen_percent
 check "leak_jsp\$CachedSession is flagged"  'any(.class_suspects[1].suspects[]; .class | endswith("leak_jsp$CachedSession"))'
 check "thread pile-up on leak_jsp is found" 'any(.thread_analyses[1].findings[]; (.detail // "") | contains("leak_jsp"))'
 
+dashboard="$(md dashboard)"
+for pattern in 'Status: .*(WARNING|CRITICAL)' 'Heap \(Old\): [0-9]+%' 'Threads: +[0-9]+'; do
+    if grep -qE "${pattern}" <<< "${dashboard}"; then
+        echo "PASS  dashboard shows /${pattern}/"
+    else
+        echo "FAIL  dashboard shows /${pattern}/"
+        failures=$(( failures + 1 ))
+    fi
+done
+
 echo
 jqf '{old_gen: [.heap_trend[].heap_old_gen_percent], threads: [.thread_analyses[].total_threads], suspects: [.class_suspects[1].suspects[].class]}'
 

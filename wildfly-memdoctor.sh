@@ -166,6 +166,13 @@ is_app_class() {
     esac
 }
 
+# Prints a top-level scalar from a JSON file this script wrote (one "key": value per line).
+# No python3 or jq needed, so it works on minimal and air-gapped servers.
+json_field() {
+    local file="$1" key="$2"
+    grep -m1 "^ *\"${key}\":" "${file}" 2>/dev/null | sed -E 's/^[^:]*: *"?([^",]*)"?,? *$/\1/'
+}
+
 ensure_dirs() {
     mkdir -p "${DUMP_DIR}" "${REPORT_DIR}" "${LOG_DIR}" "${ALERT_DIR}"
     mkdir -p "${DUMP_DIR}/${DATE_TODAY}"
@@ -1165,20 +1172,22 @@ cmd_dashboard() {
     echo ""
 
     if [[ -n "${latest_alert}" ]]; then
-        local severity; severity=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['overall_severity'])" 2>/dev/null || echo "UNKNOWN") || true
-        local heap; heap=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['heap_old_gen_pct'])" 2>/dev/null || echo "?") || true
-        local threads; threads=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['thread_count'])" 2>/dev/null || echo "?") || true
-        local fds; fds=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['fd_count'])" 2>/dev/null || echo "?") || true
+        local severity heap threads fds
+        severity=$(json_field "${latest_alert}" overall_severity) || true
+        heap=$(json_field "${latest_alert}" heap_old_gen_pct) || true
+        threads=$(json_field "${latest_alert}" thread_count) || true
+        fds=$(json_field "${latest_alert}" fd_count) || true
 
+        # Alert files are only written for WARNING or CRITICAL, so anything else means it could not be read
         case "${severity}" in
             CRITICAL) echo -e "  Status:     ${RED}■ CRITICAL${RST}" ;;
             WARNING)  echo -e "  Status:     ${YEL}■ WARNING${RST}" ;;
-            *)        echo -e "  Status:     ${GRN}■ HEALTHY${RST}" ;;
+            *)        echo -e "  Status:     ${YEL}■ UNKNOWN (could not read ${latest_alert})${RST}" ;;
         esac
-        echo -e "  Heap (Old): ${heap}%"
-        echo -e "  Threads:    ${threads}"
-        echo -e "  File Descs: ${fds}"
-        echo -e "  Last Check: $(basename ${latest_alert} .json | sed 's/alert_//')"
+        echo -e "  Heap (Old): ${heap:-?}%"
+        echo -e "  Threads:    ${threads:-?}"
+        echo -e "  File Descs: ${fds:-?}"
+        echo -e "  Last Alert: $(basename "${latest_alert}" .json | sed 's/alert_//')"
     else
         echo -e "  ${YEL}No monitoring data yet. Run: ./wildfly-memdoctor.sh snapshot${RST}"
     fi
