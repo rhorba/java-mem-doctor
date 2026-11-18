@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# WildFly MemDoctor v1.0
+# WildFly MemDoctor v1.1
 # ─────────────────────────────────────────────────────────────────────────────
 # Java Heap / Stack / Thread Dump Analyzer for WildFly Application Servers
 #
