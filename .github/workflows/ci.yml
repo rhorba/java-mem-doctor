@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Shellcheck (errors only for now)
+      - name: Shellcheck
         run: |
           shellcheck --version
-          shellcheck -S error wildfly-memdoctor.sh lab/smoke-test.sh
+          shellcheck -S warning wildfly-memdoctor.sh lab/smoke-test.sh
 
   smoke:
     runs-on: ubuntu-latest
