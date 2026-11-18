@@ -59,7 +59,6 @@ HEAP_WARN_PERCENT=75       # Warn when heap usage > 75%
 HEAP_CRITICAL_PERCENT=90   # Critical alert when heap > 90%
 THREAD_WARN_COUNT=300      # Warn when thread count > 300
 THREAD_CRITICAL_COUNT=500  # Critical when threads > 500
-GC_OVERHEAD_WARN=30        # Warn when GC time > 30% of total time
 METASPACE_WARN_PERCENT=85  # Warn when metaspace > 85% of -XX:MaxMetaspaceSize
 STUCK_STACK_THRESHOLD=50   # Warn when this many threads sit on the same application frame
 TOP_CONSUMER_PERCENT=25    # Flag a class holding more than 25% of the live heap (50% for byte[]/char[])
@@ -72,9 +71,6 @@ MONITOR_INTERVAL=60
 
 # Retention: days to keep dumps and reports
 RETENTION_DAYS=30
-
-# Report email (optional — leave empty to skip)
-REPORT_EMAIL=""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INTERNAL VARIABLES
@@ -100,7 +96,7 @@ RST='\033[0m'
 log() {
     local level="$1"; shift
     local msg="$*"
-    local ts=$(date '+%Y-%m-%d %H:%M:%S')
+    local ts; ts=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[${ts}] [${level}] ${msg}" >> "${LOG_FILE}"
     case "${level}" in
         ERROR)    echo -e "${RED}[${level}] ${msg}${RST}" >&2 ;;
@@ -340,7 +336,7 @@ analyze_heap_stats() {
     log INFO "Analyzing heap statistics..."
 
     # Parse jstat -gcutil output
-    local gcutil_line=$(grep -A1 "^  S0" "${stats_file}" 2>/dev/null | tail -1)
+    local gcutil_line; gcutil_line=$(grep -A1 "^  S0" "${stats_file}" 2>/dev/null | tail -1) || true
     if [[ -z "${gcutil_line}" ]]; then
         gcutil_line=$(sed -n '/JSTAT GC UTIL/,/^$/p' "${stats_file}" | grep -v "===" | grep -v "^$" | tail -1)
     fi
@@ -348,7 +344,6 @@ analyze_heap_stats() {
     local old_gen_pct=0
     local eden_pct=0
     local meta_pct=0
-    local gc_time=0
 
     if [[ -n "${gcutil_line}" ]]; then
         # gcutil columns: S0 S1 E O M CCS YGC YGCT FGC FGCT CGC CGCT GCT
@@ -357,7 +352,7 @@ analyze_heap_stats() {
     fi
     meta_pct=$(sed -n 's/^METASPACE_PCT=//p' "${stats_file}" 2>/dev/null | head -1)
     meta_pct=${meta_pct:-0}
-    local old_vs_max=$(sed -n 's/^OLD_GEN_PCT=//p' "${stats_file}" 2>/dev/null | head -1)
+    local old_vs_max; old_vs_max=$(sed -n 's/^OLD_GEN_PCT=//p' "${stats_file}" 2>/dev/null | head -1) || true
     [[ -n "${old_vs_max}" ]] && old_gen_pct=${old_vs_max}
 
     cat > "${result_file}" <<EOF
@@ -416,20 +411,17 @@ analyze_thread_dump() {
 
     log INFO "Analyzing thread dump..."
 
-    local total_threads=$(count_matches '^"' "${thread_file}")
-    local blocked_threads=$(count_matches "java.lang.Thread.State: BLOCKED" "${thread_file}")
-    local waiting_threads=$(count_matches "java.lang.Thread.State: WAITING" "${thread_file}")
-    local timed_waiting=$(count_matches "java.lang.Thread.State: TIMED_WAITING" "${thread_file}")
-    local runnable_threads=$(count_matches "java.lang.Thread.State: RUNNABLE" "${thread_file}")
-    local deadlocks=$(count_matches "Found.*deadlock" "${thread_file}")
+    local total_threads; total_threads=$(count_matches '^"' "${thread_file}") || true
+    local blocked_threads; blocked_threads=$(count_matches "java.lang.Thread.State: BLOCKED" "${thread_file}") || true
+    local waiting_threads; waiting_threads=$(count_matches "java.lang.Thread.State: WAITING" "${thread_file}") || true
+    local timed_waiting; timed_waiting=$(count_matches "java.lang.Thread.State: TIMED_WAITING" "${thread_file}") || true
+    local runnable_threads; runnable_threads=$(count_matches "java.lang.Thread.State: RUNNABLE" "${thread_file}") || true
+    local deadlocks; deadlocks=$(count_matches "Found.*deadlock" "${thread_file}") || true
 
     # Find most common stack traces (leak suspects)
-    local top_stacks=$(grep -A5 "java.lang.Thread.State:" "${thread_file}" 2>/dev/null \
+    local top_stacks; top_stacks=$(grep -A5 "java.lang.Thread.State:" "${thread_file}" 2>/dev/null \
         | grep "at " \
-        | sort | uniq -c | sort -rn | head -10)
-
-    # Find threads holding locks
-    local lock_holders=$(grep -B2 "locked <" "${thread_file}" 2>/dev/null | head -20)
+        | sort | uniq -c | sort -rn | head -10) || true
 
     # Identify suspect patterns
     local findings=""
@@ -449,13 +441,13 @@ analyze_thread_dump() {
     fi
 
     # Many threads parked on the same application frame = workers created and never released
-    local stuck_line=$(grep -A8 "java.lang.Thread.State:" "${thread_file}" 2>/dev/null \
+    local stuck_line; stuck_line=$(grep -A8 "java.lang.Thread.State:" "${thread_file}" 2>/dev/null \
         | grep "at " \
         | grep -v -E "at (java|jdk|sun|javax|jakarta|com\.sun)\.|at org\.(jboss|wildfly|xnio)\.|at io\.(undertow|netty)\." \
-        | sort | uniq -c | sort -rn | head -1 || true)
-    local stuck_count=$(echo "${stuck_line}" | awk '{print $1+0}')
+        | sort | uniq -c | sort -rn | head -1 || true) || true
+    local stuck_count; stuck_count=$(echo "${stuck_line}" | awk '{print $1+0}')
     stuck_count=${stuck_count:-0}
-    local stuck_frame=$(echo "${stuck_line}" | sed -e 's/^ *[0-9]* *//' | json_escape)
+    local stuck_frame; stuck_frame=$(echo "${stuck_line}" | sed -e 's/^ *[0-9]* *//' | json_escape) || true
     if (( stuck_count >= STUCK_STACK_THRESHOLD )); then
         findings+="{\"severity\":\"WARNING\",\"issue\":\"${stuck_count} threads sit on the same application frame\",\"detail\":\"${stuck_frame}\",\"solution\":\"Threads are created and never released. Look for an ExecutorService or Thread created per request and never shut down, or workers blocked forever on that call. Use one shared, bounded pool (ManagedExecutorService in EE) and shut it down in @PreDestroy.\"},"
     fi
@@ -490,14 +482,14 @@ analyze_class_histogram() {
     # Extract top memory consumers
     # Format: num #instances #bytes class_name
     local suspects=""
-    local total_bytes=$(grep "^Total" "${histo_file}" 2>/dev/null | tail -1 | awk '{print $3+0}')
+    local total_bytes; total_bytes=$(grep "^Total" "${histo_file}" 2>/dev/null | tail -1 | awk '{print $3+0}') || true
     total_bytes=${total_bytes:-0}
 
     # Known leak patterns
     while IFS= read -r line; do
-        local class_name=$(echo "${line}" | awk '{print $4}')
-        local instances=$(echo "${line}" | awk '{print $2}')
-        local bytes=$(echo "${line}" | awk '{print $3}')
+        local class_name; class_name=$(echo "${line}" | awk '{print $4}')
+        local instances; instances=$(echo "${line}" | awk '{print $2}')
+        local bytes; bytes=$(echo "${line}" | awk '{print $3}')
 
         [[ -z "${class_name}" ]] && continue
 
@@ -530,7 +522,7 @@ analyze_class_histogram() {
 
         # 3. Generic patterns (only when nothing more specific was found)
         [[ -z "${issue}" ]] && case "${class_name}" in
-            *HashMap*|*ConcurrentHashMap*)
+            *HashMap*)
                 # Maps are everywhere in a healthy server: only a real share of the heap counts
                 if (( pct >= GENERIC_COLLECTION_PERCENT )); then
                     issue="Map entries hold ${pct}% of the live heap (${instances} instances)"
@@ -555,13 +547,13 @@ analyze_class_histogram() {
                     solution="Ensure DB connections are closed in finally blocks or use try-with-resources. Check DataSource pool configuration in standalone.xml. Review @Transactional boundaries."
                 fi
                 ;;
-            *Session*|*HttpSession*)
+            *Session*)
                 if (( instances > 10000 )); then
                     issue="Excessive session objects (${instances})"
                     solution="Review session timeout settings. Check for large objects stored in HttpSession. Implement session cleanup listeners."
                 fi
                 ;;
-            *Timer*|*TimerTask*|*ScheduledFuture*)
+            *Timer*|*ScheduledFuture*)
                 if (( instances > 1000 )); then
                     issue="Accumulated timer/scheduler objects (${instances})"
                     solution="Cancel timers in @PreDestroy. Use ManagedScheduledExecutorService instead of java.util.Timer in EE containers."
@@ -573,7 +565,7 @@ analyze_class_histogram() {
                     solution="Classloader leak from redeployments. Restart WildFly periodically. Check for ThreadLocal values referencing webapp classes. Review JNDI lookups caching classloader references."
                 fi
                 ;;
-            *Proxy*|*\$Proxy*)
+            *Proxy*)
                 if (( instances > 10000 )); then
                     issue="Excessive proxy objects: ${class_name} (${instances})"
                     solution="Check CDI/EJB injection in request-scoped beans creating many proxies. Review @Produces methods generating proxy instances."
@@ -614,11 +606,10 @@ analyze_wildfly_subsystems() {
     local cli="${WILDFLY_HOME}/bin/jboss-cli.sh"
     if [[ -x "${cli}" ]]; then
         # Datasource pool statistics
-        local ds_stats=$(${cli} --connect --command="/subsystem=datasources/data-source=*/statistics=pool:read-resource(include-runtime=true)" 2>/dev/null || echo "{}")
+        local ds_stats; ds_stats=$(${cli} --connect --command="/subsystem=datasources/data-source=*/statistics=pool:read-resource(include-runtime=true)" 2>/dev/null || echo "{}") || true
 
-        local active_count=$(echo "${ds_stats}" | grep -oP '"ActiveCount"\s*=>\s*\K\d+' | head -1)
-        local available_count=$(echo "${ds_stats}" | grep -oP '"AvailableCount"\s*=>\s*\K\d+' | head -1)
-        local max_wait=$(echo "${ds_stats}" | grep -oP '"MaxWaitCount"\s*=>\s*\K\d+' | head -1)
+        local active_count; active_count=$(echo "${ds_stats}" | grep -oP '"ActiveCount"\s*=>\s*\K\d+' | head -1) || true
+        local available_count; available_count=$(echo "${ds_stats}" | grep -oP '"AvailableCount"\s*=>\s*\K\d+' | head -1) || true
 
         if [[ -n "${active_count}" && -n "${available_count}" ]]; then
             local total=$((active_count + available_count))
@@ -631,27 +622,25 @@ analyze_wildfly_subsystems() {
         fi
 
         # Deployment scanner status
-        local deploy_stats=$(${cli} --connect --command="/subsystem=deployment-scanner/scanner=default:read-resource" 2>/dev/null || echo "{}")
-        local auto_deploy=$(echo "${deploy_stats}" | grep -oP '"auto-deploy-exploded"\s*=>\s*\K\w+')
+        local deploy_stats; deploy_stats=$(${cli} --connect --command="/subsystem=deployment-scanner/scanner=default:read-resource" 2>/dev/null || echo "{}") || true
+        local auto_deploy; auto_deploy=$(echo "${deploy_stats}" | grep -oP '"auto-deploy-exploded"\s*=>\s*\K\w+') || true
         if [[ "${auto_deploy}" == "true" ]]; then
             findings+="{\"subsystem\":\"deployment-scanner\",\"severity\":\"WARNING\",\"issue\":\"Auto-deploy exploded is enabled\",\"solution\":\"Disable auto-deploy-exploded in production to prevent accidental redeployments causing classloader leaks.\"},"
         fi
 
-        # EJB pool stats
-        local ejb_stats=$(${cli} --connect --command="/subsystem=ejb3:read-resource(recursive=true,include-runtime=true)" 2>/dev/null || echo "{}")
     fi
 
     # Check WildFly server log for OOM warnings
     if [[ -f "${WILDFLY_LOG}" ]]; then
         # Real errors only: JVM flags such as -XX:+HeapDumpOnOutOfMemoryError also appear in the boot log
-        local oom_count=$(count_matches "java\.lang\.OutOfMemoryError" "${WILDFLY_LOG}")
+        local oom_count; oom_count=$(count_matches "java\.lang\.OutOfMemoryError" "${WILDFLY_LOG}") || true
         if (( oom_count > 0 )); then
-            local last_oom=$(grep "java\.lang\.OutOfMemoryError" "${WILDFLY_LOG}" | tail -1 | cut -c1-300 | json_escape)
+            local last_oom; last_oom=$(grep "java\.lang\.OutOfMemoryError" "${WILDFLY_LOG}" | tail -1 | cut -c1-300 | json_escape) || true
             findings+="{\"subsystem\":\"jvm\",\"severity\":\"CRITICAL\",\"issue\":\"${oom_count} OOM errors found in server.log\",\"detail\":\"Last: ${last_oom}\",\"solution\":\"Increase -Xmx in standalone.conf. If recurring, analyze heap dumps to find leak source. Consider adding -XX:+HeapDumpOnOutOfMemoryError.\"},"
         fi
 
         # Check for stuck deployments
-        local stuck=$(count_matches "WFLYSRV0coords.*deploy.*stuck\|MSC.*service.*failed" "${WILDFLY_LOG}")
+        local stuck; stuck=$(count_matches "WFLYSRV0coords.*deploy.*stuck\|MSC.*service.*failed" "${WILDFLY_LOG}") || true
         if (( stuck > 0 )); then
             findings+="{\"subsystem\":\"deployment\",\"severity\":\"WARNING\",\"issue\":\"${stuck} stuck/failed deployment entries in log\",\"solution\":\"Review deployment dependencies. Check for circular CDI injection. Verify all required DataSources and JMS queues exist.\"},"
         fi
@@ -680,19 +669,17 @@ check_precrash_indicators() {
     local severity="OK"
 
     # 1. Heap usage trend
-    local gcutil=$(${JSTAT} -gcutil "${pid}" 2>/dev/null | tail -1)
-    local old_pct=$(get_old_gen_pct "${pid}")
+    local gcutil; gcutil=$(${JSTAT} -gcutil "${pid}" 2>/dev/null | tail -1) || true
+    local old_pct; old_pct=$(get_old_gen_pct "${pid}") || true
     old_pct=${old_pct:-0}
-    local meta_pct=$(get_metaspace_pct "${pid}")
-    local fgc_count=$(echo "${gcutil}" | awk '{print $9}')
-    local fgc_time=$(echo "${gcutil}" | awk '{print $10}')
-    local gc_total_time=$(echo "${gcutil}" | awk '{print $NF}')
+    local meta_pct; meta_pct=$(get_metaspace_pct "${pid}") || true
+    local fgc_count; fgc_count=$(echo "${gcutil}" | awk '{print $9}')
 
     # 2. Check GC overhead
     # If Full GC count is high and growing, crash is coming
     local prev_fgc_file="${LOG_DIR}/.prev_fgc"
     if [[ -f "${prev_fgc_file}" ]]; then
-        local prev_fgc=$(cat "${prev_fgc_file}")
+        local prev_fgc; prev_fgc=$(cat "${prev_fgc_file}") || true
         local fgc_delta=$((fgc_count - prev_fgc))
         if (( fgc_delta > 5 )); then
             alerts+="{\"type\":\"GC_STORM\",\"severity\":\"CRITICAL\",\"message\":\"${fgc_delta} Full GCs in last monitoring interval — server thrashing\",\"time\":\"${TIMESTAMP}\",\"solution\":\"Server is spending most time in GC. Crash likely within minutes. Capture heap dump NOW and prepare for restart.\"},"
@@ -711,7 +698,7 @@ check_precrash_indicators() {
     fi
 
     # 4. Thread count
-    local thread_count=$(ls /proc/${pid}/task 2>/dev/null | wc -l || echo 0)
+    local thread_count; thread_count=$(ls /proc/${pid}/task 2>/dev/null | wc -l || echo 0) || true
     if (( thread_count > THREAD_CRITICAL_COUNT )); then
         alerts+="{\"type\":\"THREAD_LEAK\",\"severity\":\"CRITICAL\",\"message\":\"Thread count: ${thread_count} (limit: ${THREAD_CRITICAL_COUNT})\",\"time\":\"${TIMESTAMP}\",\"solution\":\"Thread leak detected. Check for ExecutorService instances not properly shut down. Review @Asynchronous EJB methods. Check WebSocket endpoint lifecycle.\"},"
         severity="CRITICAL"
@@ -724,8 +711,8 @@ check_precrash_indicators() {
     fi
 
     # 6. File descriptor exhaustion
-    local fd_count=$(ls /proc/${pid}/fd 2>/dev/null | wc -l || echo 0)
-    local fd_limit=$(cat /proc/${pid}/limits 2>/dev/null | grep "Max open files" | awk '{print $4}')
+    local fd_count; fd_count=$(ls /proc/${pid}/fd 2>/dev/null | wc -l || echo 0) || true
+    local fd_limit; fd_limit=$(cat /proc/${pid}/limits 2>/dev/null | grep "Max open files" | awk '{print $4}') || true
     if [[ -n "${fd_limit}" ]] && (( fd_limit > 0 )); then
         local fd_pct=$((fd_count * 100 / fd_limit))
         if (( fd_pct > 85 )); then
@@ -758,7 +745,7 @@ EOF
             collect_thread_dump "${pid}" >/dev/null 2>&1
             collect_class_histogram "${pid}" >/dev/null 2>&1
             # Only auto heap-dump if we haven't done one in the last 10 minutes
-            local recent_dump=$(find "${DUMP_DIR}/${DATE_TODAY}" -name "heapdump_*.hprof" -mmin -10 2>/dev/null | head -1)
+            local recent_dump; recent_dump=$(find "${DUMP_DIR}/${DATE_TODAY}" -name "heapdump_*.hprof" -mmin -10 2>/dev/null | head -1) || true
             if [[ -z "${recent_dump}" ]]; then
                 collect_heap_dump "${pid}" >/dev/null 2>&1
             fi
@@ -785,11 +772,11 @@ generate_daily_report() {
     fi
 
     # Collect all analysis files
-    local heap_analyses=$(find "${dump_path}" -name "analysis_heap_*.json" 2>/dev/null | sort)
-    local thread_analyses=$(find "${dump_path}" -name "analysis_threads_*.json" 2>/dev/null | sort)
-    local class_analyses=$(find "${dump_path}" -name "analysis_classes_*.json" 2>/dev/null | sort)
-    local wildfly_analyses=$(find "${dump_path}" -name "analysis_wildfly_*.json" 2>/dev/null | sort)
-    local alerts=$(find "${ALERT_DIR}" -name "alert_${report_date}*.json" 2>/dev/null | sort)
+    local heap_analyses; heap_analyses=$(find "${dump_path}" -name "analysis_heap_*.json" 2>/dev/null | sort) || true
+    local thread_analyses; thread_analyses=$(find "${dump_path}" -name "analysis_threads_*.json" 2>/dev/null | sort) || true
+    local class_analyses; class_analyses=$(find "${dump_path}" -name "analysis_classes_*.json" 2>/dev/null | sort) || true
+    local wildfly_analyses; wildfly_analyses=$(find "${dump_path}" -name "analysis_wildfly_*.json" 2>/dev/null | sort) || true
+    local alerts; alerts=$(find "${ALERT_DIR}" -name "alert_${report_date}*.json" 2>/dev/null | sort) || true
 
     # Build JSON data for the report
     local report_json="${REPORT_DIR}/report_${report_date}.json"
@@ -1046,19 +1033,20 @@ cmd_snapshot() {
     log INFO "Found WildFly PID: ${pid}"
 
     # Collect everything
-    local heap_stats=$(collect_heap_stats "${pid}")
-    local thread_dump=$(collect_thread_dump "${pid}")
-    local class_histo=$(collect_class_histogram "${pid}")
-    local gc_log=$(collect_gc_log_snapshot)
+    local heap_stats; heap_stats=$(collect_heap_stats "${pid}") || true
+    local thread_dump; thread_dump=$(collect_thread_dump "${pid}") || true
+    local class_histo; class_histo=$(collect_class_histogram "${pid}") || true
+    local gc_log; gc_log=$(collect_gc_log_snapshot) || true
 
-    # Analyze
-    local heap_analysis=$(analyze_heap_stats "${heap_stats}")
-    local thread_analysis=$(analyze_thread_dump "${thread_dump}")
-    local class_analysis=$(analyze_class_histogram "${class_histo}")
-    local wildfly_analysis=$(analyze_wildfly_subsystems "${pid}")
+    # Analyze: each writes its analysis_*.json. Subshells keep them isolated and,
+    # as before, a failing analysis does not stop the snapshot.
+    (analyze_heap_stats "${heap_stats}") >/dev/null || true
+    (analyze_thread_dump "${thread_dump}") >/dev/null || true
+    (analyze_class_histogram "${class_histo}") >/dev/null || true
+    (analyze_wildfly_subsystems "${pid}") >/dev/null || true
 
     # Check pre-crash indicators
-    local status=$(check_precrash_indicators "${pid}")
+    local status; status=$(check_precrash_indicators "${pid}") || true
 
     echo ""
     log INFO "=== Snapshot Complete ==="
@@ -1081,20 +1069,20 @@ cmd_monitor() {
         }
 
         # Quick health check (lightweight)
-        local status=$(check_precrash_indicators "${pid}")
+        local status; status=$(check_precrash_indicators "${pid}") || true
 
         # Every 10 minutes, do a full class histogram
-        local minute=$(date '+%M')
+        local minute; minute=$(date '+%M')
         if (( minute % 10 == 0 )); then
-            local heap_stats=$(collect_heap_stats "${pid}")
+            local heap_stats; heap_stats=$(collect_heap_stats "${pid}") || true
             analyze_heap_stats "${heap_stats}" >/dev/null 2>&1
-            local class_histo=$(collect_class_histogram "${pid}")
+            local class_histo; class_histo=$(collect_class_histogram "${pid}") || true
             analyze_class_histogram "${class_histo}" >/dev/null 2>&1
         fi
 
         # Every hour, capture thread dump
         if (( minute == 0 )); then
-            local thread_dump=$(collect_thread_dump "${pid}")
+            local thread_dump; thread_dump=$(collect_thread_dump "${pid}") || true
             analyze_thread_dump "${thread_dump}" >/dev/null 2>&1
             analyze_wildfly_subsystems "${pid}" >/dev/null 2>&1
         fi
@@ -1168,8 +1156,8 @@ EOF
 }
 
 cmd_dashboard() {
-    local latest_report=$(ls -t "${REPORT_DIR}"/report_*.json 2>/dev/null | head -1)
-    local latest_alert=$(ls -t "${ALERT_DIR}"/alert_*.json 2>/dev/null | head -1)
+    local latest_report; latest_report=$(ls -t "${REPORT_DIR}"/report_*.json 2>/dev/null | head -1) || true
+    local latest_alert; latest_alert=$(ls -t "${ALERT_DIR}"/alert_*.json 2>/dev/null | head -1) || true
 
     echo -e "${WHT}╔══════════════════════════════════════════════════╗${RST}"
     echo -e "${WHT}║    🩺 WildFly MemDoctor Dashboard                ║${RST}"
@@ -1177,10 +1165,10 @@ cmd_dashboard() {
     echo ""
 
     if [[ -n "${latest_alert}" ]]; then
-        local severity=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['overall_severity'])" 2>/dev/null || echo "UNKNOWN")
-        local heap=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['heap_old_gen_pct'])" 2>/dev/null || echo "?")
-        local threads=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['thread_count'])" 2>/dev/null || echo "?")
-        local fds=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['fd_count'])" 2>/dev/null || echo "?")
+        local severity; severity=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['overall_severity'])" 2>/dev/null || echo "UNKNOWN") || true
+        local heap; heap=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['heap_old_gen_pct'])" 2>/dev/null || echo "?") || true
+        local threads; threads=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['thread_count'])" 2>/dev/null || echo "?") || true
+        local fds; fds=$(python3 -c "import json;print(json.load(open('${latest_alert}'))['fd_count'])" 2>/dev/null || echo "?") || true
 
         case "${severity}" in
             CRITICAL) echo -e "  Status:     ${RED}■ CRITICAL${RST}" ;;
