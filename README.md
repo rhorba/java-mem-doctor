@@ -1,5 +1,7 @@
 # 🩺 WildFly MemDoctor v1.1
 
+[![CI](https://github.com/rhorba/java-mem-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/rhorba/java-mem-doctor/actions/workflows/ci.yml)
+
 **Offline Java Heap / Stack / Thread Dump Analyzer for WildFly Application Servers**
 
 Detects memory leaks, predicts crashes, and suggests exact code fixes — works fully air-gapped (no internet required on PROD).
@@ -32,6 +34,9 @@ docker exec memlab bash -c 'cd /opt/wildfly-memdoctor && ./wildfly-memdoctor.sh 
 ```
 
 The HTML report is self-contained: the data is embedded, so it opens with a double-click on any machine.
+
+`bash lab/smoke-test.sh` runs those same steps and fails unless the report flags the leak and leaves the
+baseline clean. CI runs it on every push and pull request, next to `shellcheck`. It needs `docker`, `curl` and `jq`.
 
 ---
 
